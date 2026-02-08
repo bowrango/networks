@@ -1,6 +1,6 @@
 end2end
 SampleLog
-client.py
-server.py
 switch*.log
 Controller.log
+Performance.log
+__pycache__/

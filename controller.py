@@ -12,70 +12,17 @@ import threading
 import time
 from datetime import datetime
 import heapq
-import hashlib
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Optional
 
-# Type aliases (from common.py)
-Topology = Dict[int, List[Tuple[int, int]]]
-SwitchInfo = Dict[str, Any]
-RoutingEntry = List[int]
-NeighborInfo = Dict[str, Any]
-
-# Network constants
-LOCALHOST: str = '127.0.0.1'
-BUFFER_SIZE: int = 4096
-
-# Distance constants
-UNREACHABLE_DISTANCE: int = 9999
-UNREACHABLE_HOP: int = -1
-
-# Message keys
-KEY_HOST: str = 'host'
-KEY_PORT: str = 'port'
-KEY_NEIGHBOR_ID: str = 'id'
-KEY_ALIVE: str = 'alive'
-
-# Binary message type codes
-BIN_REGISTER_REQUEST: int = 1
-BIN_REGISTER_RESPONSE: int = 2
-BIN_ROUTING_UPDATE: int = 3
-BIN_KEEP_ALIVE: int = 4
-BIN_TOPOLOGY_UPDATE: int = 5
-
-# Timing constants
-UPDATE_DELAY: int = 2
-TIMEOUT: int = 3 * UPDATE_DELAY
-
-def deserialize_topology_update(data: bytes) -> Tuple[int, List[Tuple[int, bool]]]:
-    offset = 1
-    switch_id = struct.unpack('!i', data[offset:offset+4])[0]
-    offset += 4
-    num_neighbors = struct.unpack('!H', data[offset:offset+2])[0]
-    offset += 2
-    neighbors = []
-    for _ in range(num_neighbors):
-        nid, alive = struct.unpack('!iB', data[offset:offset+5])
-        offset += 5
-        neighbors.append((nid, bool(alive)))
-    return switch_id, neighbors
-
-def serialize_register_response(neighbors: List[NeighborInfo]) -> bytes:
-    data = struct.pack('!BH', BIN_REGISTER_RESPONSE, len(neighbors))
-    for nbr in neighbors:
-        host_bytes = nbr[KEY_HOST].encode('utf-8') + b'\x00'
-        data += struct.pack('!iBi', nbr[KEY_NEIGHBOR_ID], 1 if nbr[KEY_ALIVE] else 0, nbr[KEY_PORT])
-        data += host_bytes
-    return data
-
-def serialize_routing_update(routes: List[RoutingEntry]) -> bytes:
-    data = struct.pack('!BH', BIN_ROUTING_UPDATE, len(routes))
-    for route in routes:
-        data += struct.pack('!iiii', route[0], route[1], route[2], route[3])
-    return data
-
-def deserialize_register_request(data: bytes) -> Tuple[int, int]:
-    _, switch_id, port = struct.unpack('!Bii', data[:9])
-    return switch_id, port
+from common import (
+    Topology, SwitchInfo, RoutingEntry, NeighborInfo,
+    LOCALHOST, BUFFER_SIZE, UNREACHABLE_DISTANCE, UNREACHABLE_HOP,
+    KEY_HOST, KEY_PORT, KEY_NEIGHBOR_ID, KEY_ALIVE,
+    BIN_REGISTER_REQUEST, BIN_TOPOLOGY_UPDATE,
+    UPDATE_DELAY, TIMEOUT,
+    serialize_register_response, serialize_routing_update,
+    deserialize_register_request, deserialize_topology_update,
+)
 
 # Please do not modify the name of the log file, otherwise you will lose points because the grader won't be able to find your log file
 LOG_FILE = "Controller.log"
@@ -104,27 +51,27 @@ def register_response_sent(switch_id: int) -> None:
     log.append(f"Register Response {switch_id}\n")
     write_to_log(log)
 
-# For the parameter "routing_table", it should be a list of lists in the form of [[...], [...], ...]. 
+# For the parameter "routing_table", it should be a list of lists in the form of [[...], [...], ...].
 # Within each list in the outermost list, the first element is <Switch ID>. The second is <Dest ID>, and the third is <Next Hop>, and the fourth is <Shortest distance>
 # "Routing Update" Format is below:
 #
 # Timestamp
-# Routing Update 
+# Routing Update
 # <Switch ID>,<Dest ID>:<Next Hop>,<Shortest distance>
 # ...
 # ...
 # Routing Complete
 #
-# You should also include all of the Self routes in your routing_table argument -- e.g.,  Switch (ID = 4) should include the following entry: 		
+# You should also include all of the Self routes in your routing_table argument -- e.g.,  Switch (ID = 4) should include the following entry:
 # 4,4:4,0
-# 0 indicates ‘zero‘ distance
+# 0 indicates 'zero' distance
 #
-# For switches that can’t be reached, the next hop and shortest distance should be ‘-1’ and ‘9999’ respectively. (9999 means infinite distance so that that switch can’t be reached)
+# For switches that can't be reached, the next hop and shortest distance should be '-1' and '9999' respectively. (9999 means infinite distance so that that switch can't be reached)
 #  E.g, If switch=4 cannot reach switch=5, the following should be printed
 #  4,5:-1,9999
 #
-# For any switch that has been killed, do not include the routes that are going out from that switch. 
-# One example can be found in the sample log in starter code. 
+# For any switch that has been killed, do not include the routes that are going out from that switch.
+# One example can be found in the sample log in starter code.
 # After switch 1 is killed, the routing update from the controller does not have routes from switch 1 to other switches.
 
 def routing_table_update(routing_table: List[RoutingEntry]) -> None:
@@ -177,44 +124,34 @@ def write_to_log(log: List[str]) -> None:
 
 class RoutingCache:
     def __init__(self) -> None:
-        self._topo_hash: Optional[str] = None
-        self._routes: Optional[List[RoutingEntry]] = None
+        self._last_topo: Optional[Topology] = None
+        self.routes_by_switch: Dict[int, List[RoutingEntry]] = {}
         self._n: int = 0
 
-    def get_routes(self, topo: Topology, n: int) -> Tuple[List[RoutingEntry], bool]:
-        topo_hash = self._compute_topo_hash(topo)
-        if self._routes is not None and self._topo_hash == topo_hash and self._n == n:
-            return self._routes, False
-
-        # Recompute new topology
-        self._routes = self._compute_routing_tables(topo, n)
-        self._topo_hash = topo_hash
+    def update(self, topo: Topology, n: int) -> bool:
+        if self._last_topo == topo and self._n == n:
+            return False
+        self.routes_by_switch = self._compute_routing_tables(topo, n)
+        self._last_topo = topo
         self._n = n
-        return self._routes, True
-    
-    def clear(self) -> None:
-        self._topo_hash = None
-        self._routes = None
+        return True
 
-    def _compute_topo_hash(self, topo: Topology) -> str:
-        # Sort topology for consistent hashing
-        topo_str = ""
-        for sid in sorted(topo.keys()):
-            neighbors = sorted(topo[sid])
-            topo_str += f"{sid}:{neighbors};"
-        return hashlib.md5(topo_str.encode()).hexdigest()
+    def flat_routes(self, switch_alive: Optional[Dict[int, bool]] = None) -> List[RoutingEntry]:
+        return [r for sid, routes in self.routes_by_switch.items()
+                if switch_alive is None or switch_alive.get(sid, False)
+                for r in routes]
 
-    def _compute_routing_tables(self, topo: Topology, n: int) -> List[RoutingEntry]:
-        routes: List[RoutingEntry] = []
+    def _compute_routing_tables(self, topo: Topology, n: int) -> Dict[int, List[RoutingEntry]]:
+        by_switch: Dict[int, List[RoutingEntry]] = {}
         for sid in range(n):
             dist, hop = self._dijkstra(sid, topo, n)
+            by_switch[sid] = []
             for did in range(n):
                 if dist[did] == float('inf'):
-                    routes.append([sid, did, UNREACHABLE_HOP, UNREACHABLE_DISTANCE])
+                    by_switch[sid].append([sid, did, UNREACHABLE_HOP, UNREACHABLE_DISTANCE])
                 else:
-                    routes.append([sid, did, hop[did], int(dist[did])])
-
-        return routes
+                    by_switch[sid].append([sid, did, hop[did], int(dist[did])])
+        return by_switch
 
     def _dijkstra(self, src: int, topo: Topology, n: int) -> Tuple[Dict[int, float], Dict[int, int]]:
         # Compute shortest path from the source switch to all reachable switches
@@ -252,6 +189,18 @@ class RoutingCache:
                 hop[dst] = node if prev[node] == src else UNREACHABLE_HOP
 
         return dist, hop
+
+def build_neighbor_list(topo: Topology, sid: int, sw: Dict[int, SwitchInfo],
+                        switch_alive: Optional[Dict[int, bool]] = None) -> List[NeighborInfo]:
+    nbrs = []
+    for nid, _ in topo.get(sid, []):
+        nbrs.append({
+            KEY_NEIGHBOR_ID: nid,
+            KEY_ALIVE: switch_alive.get(nid, False) if switch_alive else True,
+            KEY_HOST: sw.get(nid, {}).get(KEY_HOST, LOCALHOST),
+            KEY_PORT: sw.get(nid, {}).get(KEY_PORT, 0)
+        })
+    return nbrs
 
 def bootstrap(port: int, cfg: str) -> Tuple[socket.socket, Dict[int, SwitchInfo], Topology]:
     # Register Switches with the Controller
@@ -306,18 +255,7 @@ def bootstrap(port: int, cfg: str) -> Tuple[socket.socket, Dict[int, SwitchInfo]
 
     # Send Register Response to each switch once they've been registered
     for sid, info in sw.items():
-        # Prepare neighbor information for this switch
-        nbrs = []
-        for nid, dist in topo[sid]:
-            nbr = {
-                KEY_NEIGHBOR_ID: nid,
-                KEY_ALIVE: True,
-                KEY_HOST: sw[nid][KEY_HOST],
-                KEY_PORT: sw[nid][KEY_PORT]
-            }
-            nbrs.append(nbr)
-
-        # Send Register Response (binary format)
+        nbrs = build_neighbor_list(topo, sid, sw)
         ctrl.sendto(
             serialize_register_response(nbrs),
             (info[KEY_HOST], info[KEY_PORT])
@@ -343,25 +281,18 @@ def build_topology(topo_template: Topology, switch_alive: Dict[int, bool],
     return current_topo
 
 def send_routing_updates(ctrl: socket.socket, sw: Dict[int, SwitchInfo],
-                         routes: List[RoutingEntry],
+                         routes_by_switch: Dict[int, List[RoutingEntry]],
                          switch_alive: Optional[Dict[int, bool]] = None) -> None:
-    # Group routing table entries by switch
-    tbl: Dict[int, List[RoutingEntry]] = {}
-    for e in routes:
-        sid = e[0]
-        if sid not in tbl:
-            tbl[sid] = []
-        tbl[sid].append(e)
-
     # Send routing update to each switch (binary format)
-    for sid, rt in tbl.items():
-        if sid in sw:
-            if switch_alive is not None and not switch_alive.get(sid, False):
-                continue
-            ctrl.sendto(
-                serialize_routing_update(rt),
-                (sw[sid][KEY_HOST], sw[sid][KEY_PORT])
-            )
+    for sid, rt in routes_by_switch.items():
+        if sid not in sw:
+            continue
+        if switch_alive is not None and not switch_alive.get(sid, False):
+            continue
+        ctrl.sendto(
+            serialize_routing_update(rt),
+            (sw[sid][KEY_HOST], sw[sid][KEY_PORT])
+        )
 
 def main() -> None:
     # Check for number of arguments and exit if host/port not provided
@@ -380,13 +311,13 @@ def main() -> None:
 
     # Compute routing tables
     n = len(sw)
-    routes, _ = cache.get_routes(topo, n)
+    cache.update(topo, n)
 
     # Log routing update
-    routing_table_update(routes)
+    routing_table_update(cache.flat_routes())
 
     # Send routing updates to all switches
-    send_routing_updates(ctrl, sw, routes)
+    send_routing_updates(ctrl, sw, cache.routes_by_switch)
 
     # Initialize state for topology change tracking
     topo_template = topo
@@ -399,11 +330,9 @@ def main() -> None:
 
     def recompute_and_send() -> None:
         current_topo = build_topology(topo_template, switch_alive, switch_neighbors)
-        routes, was_recomputed = cache.get_routes(current_topo, n)
-        if was_recomputed:
-            active_routes = [r for r in routes if switch_alive.get(r[0], False)]
-            routing_table_update(active_routes)
-            send_routing_updates(ctrl, sw, active_routes, switch_alive)
+        if cache.update(current_topo, n):
+            routing_table_update(cache.flat_routes(switch_alive))
+            send_routing_updates(ctrl, sw, cache.routes_by_switch, switch_alive)
 
     def periodic_check() -> None:
         while True:
@@ -463,16 +392,7 @@ def main() -> None:
                 sw[sid_restart] = {KEY_HOST: addr[0], KEY_PORT: sport_restart}
 
                 # Send register response with current neighbor info
-                nbrs = []
-                for nid, _ in topo_template.get(sid_restart, []):
-                    nbr = {
-                        KEY_NEIGHBOR_ID: nid,
-                        KEY_ALIVE: switch_alive.get(nid, False),
-                        KEY_HOST: sw.get(nid, {}).get(KEY_HOST, LOCALHOST),
-                        KEY_PORT: sw.get(nid, {}).get(KEY_PORT, 0)
-                    }
-                    nbrs.append(nbr)
-
+                nbrs = build_neighbor_list(topo_template, sid_restart, sw, switch_alive)
                 ctrl.sendto(
                     serialize_register_response(nbrs),
                     (addr[0], sport_restart)
@@ -492,11 +412,8 @@ def main() -> None:
                 recompute_and_send()
 
                 # Send this switch its specific routes
-                current_topo = build_topology(topo_template, switch_alive, switch_neighbors)
-                all_routes, _ = cache.get_routes(current_topo, n)
-                switch_routes = [r for r in all_routes if r[0] == sid_restart]
                 ctrl.sendto(
-                    serialize_routing_update(switch_routes),
+                    serialize_routing_update(cache.routes_by_switch.get(sid_restart, [])),
                     (addr[0], sport_restart)
                 )
 

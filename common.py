@@ -21,14 +21,9 @@ TIMEOUT: int = 3 * UPDATE_DELAY
 # Distance constants
 UNREACHABLE_DISTANCE: int = 9999
 UNREACHABLE_HOP: int = -1
-SELF_DISTANCE: int = 0
 
 # Message keys
-KEY_TYPE: str = 'type'
-KEY_SWITCH_ID: str = 'switch_id'
 KEY_PORT: str = 'port'
-KEY_NEIGHBORS: str = 'neighbors'
-KEY_ROUTES: str = 'routes'
 KEY_NEIGHBOR_ID: str = 'id'
 KEY_ALIVE: str = 'alive'
 KEY_HOST: str = 'host'
@@ -114,3 +109,29 @@ def deserialize_routing_update(data: bytes) -> List[RoutingEntry]:
         routes.append([sid, did, hop, dist])
 
     return routes
+
+def serialize_keep_alive(switch_id: int) -> bytes:
+    return struct.pack('!Bi', BIN_KEEP_ALIVE, switch_id)
+
+def deserialize_keep_alive(data: bytes) -> int:
+    _, switch_id = struct.unpack('!Bi', data[:5])
+    return switch_id
+
+def serialize_topology_update(switch_id: int, neighbors: List[Tuple[int, bool]]) -> bytes:
+    data = struct.pack('!BiH', BIN_TOPOLOGY_UPDATE, switch_id, len(neighbors))
+    for nid, alive in neighbors:
+        data += struct.pack('!iB', nid, 1 if alive else 0)
+    return data
+
+def deserialize_topology_update(data: bytes) -> Tuple[int, List[Tuple[int, bool]]]:
+    offset = 1
+    switch_id = struct.unpack('!i', data[offset:offset+4])[0]
+    offset += 4
+    num_neighbors = struct.unpack('!H', data[offset:offset+2])[0]
+    offset += 2
+    neighbors = []
+    for _ in range(num_neighbors):
+        nid, alive = struct.unpack('!iB', data[offset:offset+5])
+        offset += 5
+        neighbors.append((nid, bool(alive)))
+    return switch_id, neighbors
